@@ -7,4 +7,5 @@ assets/guest86
 /local
 /dist
 .DS_Store
+.scratch
 **result

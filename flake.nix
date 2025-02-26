@@ -10,12 +10,138 @@
     flake-utils.lib.eachDefaultSystem (system:
     let
       pkgs = import nixpkgs { inherit system; };
+      #pkgs-x86 = import nixpkgs { system = "i686-linux"; };
       lib = pkgs.lib;
       llvm = pkgs.llvmPackages_latest;
       # TODO: real version
       env86-version = "1";
+      alpine-version = "3.18";
+      alpine-patch-version = "6";
+      alpine-kernel-version = "6.1.129";
+      alpine-kernel-patch-version = "0";
     in {
       packages = rec {
+        alpine-kernel = pkgs.stdenv.mkDerivation rec {
+          pname = "alpine-linux-lts";
+          version = "${alpine-kernel-version}-r${alpine-kernel-patch-version}";
+          src = pkgs.fetchurl {
+            url = "https://dl-cdn.alpinelinux.org/alpine/v${alpine-version}/main/x86/linux-lts-${version}.apk";
+            hash = "sha256-iNN9TR+7BKtJBS8GJzhjncxHom0p1Vn8d5JRWJ4mB0w=";
+          };
+
+          unpackPhase = ''
+            tar -xvf $src
+          '';
+
+          buildPhase = ''
+            true
+          '';
+
+          installPhase = ''
+            mkdir -p "$out"
+            shopt -s extglob
+            cp -r !(env-vars) "$out"/
+          '';
+
+          dontFixup = true;
+        };
+        alpine-initramfs = pkgs.stdenv.mkDerivation rec {
+          pname = "alpine-initramfs";
+          version = alpine-version;
+          # mkinitfs needs a root filesystem to work from
+          #src = pkgs.fetchurl {
+          #  url = "https://dl-cdn.alpinelinux.org/alpine/v${alpine-version}/releases/x86/alpine-minirootfs-${alpine-version}.${alpine-patch-version}-x86.tar.gz";
+          #  hash = "sha256-WayxARDRGvHwHtwYL7OK1Y8DzOFeqswTAEHmQdGP3Y0=";
+          #};
+          #unpackPhase = ''
+          #  tar -xvf $src
+          #'';
+          src = pkgs.fetchurl {
+            url = "https://dl-cdn.alpinelinux.org/alpine/v${alpine-version}/releases/x86/alpine-standard-${alpine-version}.${alpine-patch-version}-x86.iso";
+            hash = "sha256-cgsWRrsNkwTqhhgTFLYeylR/U3l0eoivTHACdFojMCs=";
+          };
+          unpackPhase = ''
+            mkdir -p .iso
+            7z x -o.iso "$src"
+
+            gzip -cd .iso/boot/initramfs-lts | cpio -idmv
+
+            rm -rf .iso
+          '';
+
+          nativeBuildInputs = with pkgs;[
+            self.packages.${system}.mkinitfs-hack
+            p7zip
+            cpio
+            pax-utils
+            kmod
+          ];
+
+
+          buildPhase = ''
+            cp -r ${self.packages.${system}.alpine-kernel}/* .
+
+            export SYSCONFDIR=${self.packages.${system}.mkinitfs}/etc/mkinitfs
+            export DATADIR=${self.packages.${system}.mkinitfs}/usr/share/mkinitfs
+
+            mkinitfs-hack \
+              -F "ata base ide scsi virtio ext4 9p" \
+              -b "$(pwd)" \
+              ${alpine-kernel-version}-${alpine-kernel-patch-version}-lts
+          '';
+
+
+          installPhase = ''
+            mkdir -p "$out"
+            cp -r boot/initramfs-lts "$out"/
+          '';
+
+          dontFixup = true;
+
+        };
+        mkinitfs-hack = let
+          script-src = builtins.readFile ./mkinitfs;
+        in
+          (pkgs.writeScriptBin "mkinitfs-hack" script-src).overrideAttrs(old: {
+            buildCommand = "${old.buildCommand}\n patchShebangs $out";
+          });
+        mkinitfs = pkgs.stdenv.mkDerivation rec {
+          pname = "mkinitfs";
+          version = "3.11.1";
+          src = pkgs.fetchFromGitHub {
+            owner = "alpinelinux";
+            repo = pname;
+            rev = version;
+            hash = "sha256-yxZFn8BjIkcd+2560/dvh37rfshKlfG0LgRH19QR++c=";
+          };
+
+          patchPhase = ''
+            substituteInPlace Makefile \
+              --replace "CFLAGS ?= -Wall -Werror -g" "CFLAGS ?= -Wall -g"
+
+            # O_CREAT needs a file mode, no idea what this should be though
+            # This similar issue https://github.com/pantheon-systems/fusedav/issues/204
+            # suggests 0600
+            substituteInPlace nlplug-findfs/nlplug-findfs.c \
+              --replace "fd = open(outfile, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC);" \
+                "fd = open(outfile, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);"
+          '';
+
+          nativeBuildInputs = with pkgs; [
+            pkg-config
+          ];
+
+          buildInputs = with pkgs; [
+            kmod
+            util-linux
+            cryptsetup
+          ];
+
+          makeFlags= [
+            "DESTDIR=$(out)"
+            "sbindir=/bin"
+          ];
+        };
         guest86-modules = (pkgs.buildGoModule {
           name = "env86-modules";
           version = env86-version;
@@ -24,6 +150,7 @@
           vendorHash = "sha256-e2Nq1Oaqccw2CYe7+P+SVEVBC4DkzRuS6RlxQ4fXZnE=";
 
         }).goModules;
+        # VM Guest binary, must always be i386 and linked normally
         guest86 = pkgs.stdenv.mkDerivation rec {
           pname = "guest86";
           version = env86-version;
@@ -50,6 +177,8 @@
             mkdir -p "$out/bin/"
             cp guest86 "$out/bin/"
           '';
+
+          dontFixup = true;
         };
         v86-bin = pkgs.stdenv.mkDerivation rec {
           pname = "v86-bin";
@@ -168,6 +297,8 @@
             # HACK: Copy in guest binaries from outside packages
             cp -r ${self.packages.${system}.v86-bin}/* assets/
             cp -r ${self.packages.${system}.guest86}/bin/guest86 assets/
+            cp -r ${self.packages.${system}.alpine-kernel}/boot/vmlinuz-lts assets/vmlinuz.bin
+            cp -r ${self.packages.${system}.alpine-initramfs}/initramfs-lts assets/initramfs.bin
           '';
           vendorHash = null;
 
@@ -182,6 +313,7 @@
       };
       devShells.default = pkgs.mkShell {
         buildInputs = with pkgs; [
+          pax-utils
           go
           gnumake
         ];

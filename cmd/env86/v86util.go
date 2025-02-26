@@ -29,7 +29,7 @@ const (
 	IDX_GID      = 5
 	IDX_TARGET   = 6
 	IDX_FILENAME = 6
-	HASH_LENGTH  = 8
+	HASH_LENGTH  = 16
 	S_IFLNK      = 0xA000
 	S_IFREG      = 0x8000
 	S_IFDIR      = 0x4000
